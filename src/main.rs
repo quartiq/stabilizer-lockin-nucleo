@@ -28,6 +28,7 @@ extern crate log;
 
 // use core::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 use cortex_m_rt::exception;
+use cortex_m_semihosting::hprintln;
 use rtic::cyccnt::{Instant, U32Ext};
 use stm32h7xx_hal as hal;
 use stm32h7xx_hal::prelude::*;
@@ -57,11 +58,29 @@ mod afe;
 mod dac;
 mod eeprom;
 mod iir;
+mod lockin;
 mod pounder;
 mod server;
+mod trig;
+mod sinf;
+mod cosf;
+mod rem_pio2f;
+mod k_sinf;
+mod k_cosf;
 
 use adc::{Adc0Input, Adc1Input, AdcInputs};
 use dac::DacOutputs;
+use lockin::{postfilt_at, postfilt_iq, prefilt, TimeStamp, arr};
+
+// Gives exactly 4 timestamps.
+const FFAST: u32 = 125_000_000;
+const INPUT_BUFFER_SIZE: usize = 16;
+const FSCALE: u16 = 1;
+const FREF: u32 = 125_000;
+const TSTAMP_INC: u16 = (FFAST / FREF) as u16;
+const TSTAMP_MAX: u16 = arr(FFAST, SAMPLE_FREQUENCY_KHZ * 1_000, INPUT_BUFFER_SIZE as u16);
+const U32_MAX: u32 = 4_294_967_295u32;
+
 
 #[cfg(not(feature = "semihosting"))]
 fn init_log() {}
@@ -178,6 +197,12 @@ const APP: () = {
         adcs: AdcInputs,
         dacs: DacOutputs,
 
+        toggle: hal::gpio::gpiod::PD0<hal::gpio::Output<hal::gpio::PushPull>>,
+        #[init(TSTAMP_MAX - (TSTAMP_INC - 1))]
+        last_tstamp: u16,
+        #[init([TimeStamp { count: 0, sequences_old: -1 }; 2])]
+        tstamps_mem: [TimeStamp; 2],
+
         eeprom_i2c: hal::i2c::I2c<hal::stm32::I2C2>,
 
         timer: hal::timer::Timer<hal::stm32::TIM2>,
@@ -199,6 +224,13 @@ const APP: () = {
         iir_state: [iir::IIRState; 2],
         #[init([iir::IIR { ba: [1., 0., 0., 0., 0.], y_offset: 0., y_min: -SCALE - 1., y_max: SCALE }; 2])]
         iir_ch: [iir::IIR; 2],
+
+        #[init([[0.; 5]; 2])]
+        lockin_iir_state: [iir::IIRState; 2],
+        // #[init([iir::IIR { ba: [1., 0., 0., 0., 0.], y_offset: 0., y_min: -SCALE - 1., y_max: SCALE }; 2])]
+        // 1kHz lowpass filter (for a 500kHz sampling rate)
+        #[init([iir::IIR { ba: [0.000039130206, 0.00007826041, 0.000039130206, 1.9822289, -0.98238546], y_offset: 0., y_min: -SCALE - 1., y_max: SCALE }; 2])]
+        lockin_iir: [iir::IIR; 2],
     }
 
     #[init]
@@ -223,6 +255,7 @@ const APP: () = {
         let rcc = dp.RCC.constrain();
         let ccdr = rcc
             .use_hse(8.mhz())
+            .bypass_hse()
             .sysclk(400.mhz())
             .hclk(200.mhz())
             .per_ck(100.mhz())
@@ -242,14 +275,20 @@ const APP: () = {
         let gpiof = dp.GPIOF.split(ccdr.peripheral.GPIOF);
         let gpiog = dp.GPIOG.split(ccdr.peripheral.GPIOG);
 
+        let toggle = gpiod.pd0.into_push_pull_output();
+
         let afe0 = {
+            // ok: CN9_17
             let a0_pin = gpiof.pf2.into_push_pull_output();
+            // ok: CN10_9
             let a1_pin = gpiof.pf5.into_push_pull_output();
             afe::ProgrammableGainAmplifier::new(a0_pin, a1_pin)
         };
 
         let afe1 = {
+            // ok: CN7_16
             let a0_pin = gpiod.pd14.into_push_pull_output();
+            // ok: CN7_18
             let a1_pin = gpiod.pd15.into_push_pull_output();
             afe::ProgrammableGainAmplifier::new(a0_pin, a1_pin)
         };
@@ -261,14 +300,17 @@ const APP: () = {
         let adcs = {
             let adc0 = {
                 let spi_miso = gpiob
+                    // ok: CN12_28
                     .pb14
                     .into_alternate_af5()
                     .set_speed(hal::gpio::Speed::VeryHigh);
                 let spi_sck = gpiob
+                    // ok: CN7_32
                     .pb10
                     .into_alternate_af5()
                     .set_speed(hal::gpio::Speed::VeryHigh);
                 let _spi_nss = gpiob
+                    // ok: CN7_4
                     .pb9
                     .into_alternate_af5()
                     .set_speed(hal::gpio::Speed::VeryHigh);
@@ -294,14 +336,17 @@ const APP: () = {
 
             let adc1 = {
                 let spi_miso = gpiob
+                    // ok: CN7_19
                     .pb4
                     .into_alternate_af6()
                     .set_speed(hal::gpio::Speed::VeryHigh);
                 let spi_sck = gpioc
+                    // ok: CN8_6
                     .pc10
                     .into_alternate_af6()
                     .set_speed(hal::gpio::Speed::VeryHigh);
                 let _spi_nss = gpioa
+                    // ok: CN7_9
                     .pa15
                     .into_alternate_af6()
                     .set_speed(hal::gpio::Speed::VeryHigh);
@@ -329,22 +374,28 @@ const APP: () = {
         };
 
         let dacs = {
+            // ok: CN10_26
             let _dac_clr_n =
                 gpioe.pe12.into_push_pull_output().set_high().unwrap();
+            // ok: CN10_6
             let _dac0_ldac_n =
                 gpioe.pe11.into_push_pull_output().set_low().unwrap();
+            // ok: CN10_30
             let _dac1_ldac_n =
                 gpioe.pe15.into_push_pull_output().set_low().unwrap();
 
             let dac0_spi = {
+                // ok: CN9_18
                 let spi_miso = gpioe
                     .pe5
                     .into_alternate_af5()
                     .set_speed(hal::gpio::Speed::VeryHigh);
+                // ok: CN9_14
                 let spi_sck = gpioe
                     .pe2
                     .into_alternate_af5()
                     .set_speed(hal::gpio::Speed::VeryHigh);
+                // ok: CN9_16
                 let _spi_nss = gpioe
                     .pe4
                     .into_alternate_af5()
@@ -369,14 +420,17 @@ const APP: () = {
             };
 
             let dac1_spi = {
+                // ok: CN9_24
                 let spi_miso = gpiof
                     .pf8
                     .into_alternate_af5()
                     .set_speed(hal::gpio::Speed::VeryHigh);
+                // ok: CN9_26
                 let spi_sck = gpiof
                     .pf7
                     .into_alternate_af5()
                     .set_speed(hal::gpio::Speed::VeryHigh);
+                // ok: CN10_11
                 let _spi_nss = gpiof
                     .pf6
                     .into_alternate_af5()
@@ -419,160 +473,177 @@ const APP: () = {
         fp_led_2.set_low().unwrap();
         fp_led_3.set_low().unwrap();
 
-        // Measure the Pounder PGOOD output to detect if pounder is present on Stabilizer.
-        let pounder_pgood = gpiob.pb13.into_pull_down_input();
-        delay.delay_ms(2u8);
-        let pounder_devices = if pounder_pgood.is_high().unwrap() {
-            let ad9959 = {
-                let qspi_interface = {
-                    // Instantiate the QUADSPI pins and peripheral interface.
-                    let qspi_pins = {
-                        let _qspi_ncs = gpioc
-                            .pc11
-                            .into_alternate_af9()
-                            .set_speed(hal::gpio::Speed::VeryHigh);
+        // Done for nucleo compatibility, so I don't have to remap pins.
+        let pounder_devices = None;
+        // // Measure the Pounder PGOOD output to detect if pounder is present on Stabilizer.
+        // let pounder_pgood = gpiob.pb13.into_pull_down_input();
+        // delay.delay_ms(2u8);
+        // let pounder_devices = if pounder_pgood.is_high().unwrap() {
+        //     let ad9959 = {
+        //         let qspi_interface = {
+        //             // Instantiate the QUADSPI pins and peripheral interface.
+        //             let qspi_pins = {
+        //                 // ok: CN8_8
+        //                 let _qspi_ncs = gpioc
+        //                     .pc11
+        //                     .into_alternate_af9()
+        //                     .set_speed(hal::gpio::Speed::VeryHigh);
 
-                        let clk = gpiob
-                            .pb2
-                            .into_alternate_af9()
-                            .set_speed(hal::gpio::Speed::VeryHigh);
-                        let io0 = gpioe
-                            .pe7
-                            .into_alternate_af10()
-                            .set_speed(hal::gpio::Speed::VeryHigh);
-                        let io1 = gpioe
-                            .pe8
-                            .into_alternate_af10()
-                            .set_speed(hal::gpio::Speed::VeryHigh);
-                        let io2 = gpioe
-                            .pe9
-                            .into_alternate_af10()
-                            .set_speed(hal::gpio::Speed::VeryHigh);
-                        let io3 = gpioe
-                            .pe10
-                            .into_alternate_af10()
-                            .set_speed(hal::gpio::Speed::VeryHigh);
+        //                 // ok: CN9_13
+        //                 let clk = gpiob
+        //                     .pb2
+        //                     .into_alternate_af9()
+        //                     .set_speed(hal::gpio::Speed::VeryHigh);
+        //                 // ok: CN10_20
+        //                 let io0 = gpioe
+        //                     .pe7
+        //                     .into_alternate_af10()
+        //                     .set_speed(hal::gpio::Speed::VeryHigh);
+        //                 // ok: CN10_18
+        //                 let io1 = gpioe
+        //                     .pe8
+        //                     .into_alternate_af10()
+        //                     .set_speed(hal::gpio::Speed::VeryHigh);
+        //                 // ok: CN10_4
+        //                 let io2 = gpioe
+        //                     .pe9
+        //                     .into_alternate_af10()
+        //                     .set_speed(hal::gpio::Speed::VeryHigh);
+        //                 // ok: CN10_24
+        //                 let io3 = gpioe
+        //                     .pe10
+        //                     .into_alternate_af10()
+        //                     .set_speed(hal::gpio::Speed::VeryHigh);
 
-                        (clk, io0, io1, io2, io3)
-                    };
+        //                 (clk, io0, io1, io2, io3)
+        //             };
 
-                    let qspi = hal::qspi::Qspi::bank2(
-                        dp.QUADSPI,
-                        qspi_pins,
-                        10.mhz(),
-                        &ccdr.clocks,
-                        ccdr.peripheral.QSPI,
-                    );
-                    pounder::QspiInterface::new(qspi).unwrap()
-                };
+        //             let qspi = hal::qspi::Qspi::bank2(
+        //                 dp.QUADSPI,
+        //                 qspi_pins,
+        //                 10.mhz(),
+        //                 &ccdr.clocks,
+        //                 ccdr.peripheral.QSPI,
+        //             );
+        //             pounder::QspiInterface::new(qspi).unwrap()
+        //         };
 
-                let mut reset_pin = gpioa.pa0.into_push_pull_output();
-                let io_update = gpiog.pg7.into_push_pull_output();
+        //         // ok: CN10_29
+        //         let mut reset_pin = gpioa.pa0.into_push_pull_output();
+        //         // ok: CN12_67
+        //         let io_update = gpiog.pg7.into_push_pull_output();
 
-                let asm_delay = {
-                    let frequency_hz = ccdr.clocks.c_ck().0;
-                    asm_delay::AsmDelay::new(asm_delay::bitrate::Hertz(
-                        frequency_hz,
-                    ))
-                };
+        //         let asm_delay = {
+        //             let frequency_hz = ccdr.clocks.c_ck().0;
+        //             asm_delay::AsmDelay::new(asm_delay::bitrate::Hertz(
+        //                 frequency_hz,
+        //             ))
+        //         };
 
-                ad9959::Ad9959::new(
-                    qspi_interface,
-                    &mut reset_pin,
-                    io_update,
-                    asm_delay,
-                    ad9959::Mode::FourBitSerial,
-                    100_000_000f32,
-                    5,
-                )
-                .unwrap()
-            };
+        //         ad9959::Ad9959::new(
+        //             qspi_interface,
+        //             &mut reset_pin,
+        //             io_update,
+        //             asm_delay,
+        //             ad9959::Mode::FourBitSerial,
+        //             100_000_000f32,
+        //             5,
+        //         )
+        //         .unwrap()
+        //     };
 
-            let io_expander = {
-                let sda = gpiob.pb7.into_alternate_af4().set_open_drain();
-                let scl = gpiob.pb8.into_alternate_af4().set_open_drain();
-                let i2c1 = dp.I2C1.i2c(
-                    (scl, sda),
-                    100.khz(),
-                    ccdr.peripheral.I2C1,
-                    &ccdr.clocks,
-                );
-                mcp23017::MCP23017::default(i2c1).unwrap()
-            };
+        //     let io_expander = {
+        //         // ok: CN10_16
+        //         let sda = gpiob.pb7.into_alternate_af4().set_open_drain();
+        //         // ok: CN7_2
+        //         let scl = gpiob.pb8.into_alternate_af4().set_open_drain();
+        //         let i2c1 = dp.I2C1.i2c(
+        //             (scl, sda),
+        //             100.khz(),
+        //             ccdr.peripheral.I2C1,
+        //             &ccdr.clocks,
+        //         );
+        //         mcp23017::MCP23017::default(i2c1).unwrap()
+        //     };
 
-            let spi = {
-                let spi_mosi = gpiod
-                    .pd7
-                    .into_alternate_af5()
-                    .set_speed(hal::gpio::Speed::VeryHigh);
-                let spi_miso = gpioa
-                    .pa6
-                    .into_alternate_af5()
-                    .set_speed(hal::gpio::Speed::VeryHigh);
-                let spi_sck = gpiog
-                    .pg11
-                    .into_alternate_af5()
-                    .set_speed(hal::gpio::Speed::VeryHigh);
+        //     let spi = {
+        //         // ok: CN9_2
+        //         let spi_mosi = gpiod
+        //             .pd7
+        //             .into_alternate_af5()
+        //             .set_speed(hal::gpio::Speed::VeryHigh);
+        //         // ok: CN7_12
+        //         let spi_miso = gpioa
+        //             .pa6
+        //             .into_alternate_af5()
+        //             .set_speed(hal::gpio::Speed::VeryHigh);
+        //         // ok: CN7_12
+        //         let spi_sck = gpiog
+        //             .pg11
+        //             .into_alternate_af5()
+        //             .set_speed(hal::gpio::Speed::VeryHigh);
 
-                let config = hal::spi::Config::new(hal::spi::Mode {
-                    polarity: hal::spi::Polarity::IdleHigh,
-                    phase: hal::spi::Phase::CaptureOnSecondTransition,
-                });
+        //         let config = hal::spi::Config::new(hal::spi::Mode {
+        //             polarity: hal::spi::Polarity::IdleHigh,
+        //             phase: hal::spi::Phase::CaptureOnSecondTransition,
+        //         });
 
-                // The maximum frequency of this SPI must be limited due to capacitance on the MISO
-                // line causing a long RC decay.
-                dp.SPI1.spi(
-                    (spi_sck, spi_miso, spi_mosi),
-                    config,
-                    5.mhz(),
-                    ccdr.peripheral.SPI1,
-                    &ccdr.clocks,
-                )
-            };
+        //         // The maximum frequency of this SPI must be limited due to capacitance on the MISO
+        //         // line causing a long RC decay.
+        //         dp.SPI1.spi(
+        //             (spi_sck, spi_miso, spi_mosi),
+        //             config,
+        //             5.mhz(),
+        //             ccdr.peripheral.SPI1,
+        //             &ccdr.clocks,
+        //         )
+        //     };
 
-            let (adc1, adc2) = {
-                let (mut adc1, mut adc2) = hal::adc::adc12(
-                    dp.ADC1,
-                    dp.ADC2,
-                    &mut delay,
-                    ccdr.peripheral.ADC12,
-                    &ccdr.clocks,
-                );
+        //     let (adc1, adc2) = {
+        //         let (mut adc1, mut adc2) = hal::adc::adc12(
+        //             dp.ADC1,
+        //             dp.ADC2,
+        //             &mut delay,
+        //             ccdr.peripheral.ADC12,
+        //             &ccdr.clocks,
+        //         );
 
-                let adc1 = {
-                    adc1.calibrate();
-                    adc1.enable()
-                };
+        //         let adc1 = {
+        //             adc1.calibrate();
+        //             adc1.enable()
+        //         };
 
-                let adc2 = {
-                    adc2.calibrate();
-                    adc2.enable()
-                };
+        //         let adc2 = {
+        //             adc2.calibrate();
+        //             adc2.enable()
+        //         };
 
-                (adc1, adc2)
-            };
+        //         (adc1, adc2)
+        //     };
 
-            let adc1_in_p = gpiof.pf11.into_analog();
-            let adc2_in_p = gpiof.pf14.into_analog();
+        //     let adc1_in_p = gpiof.pf11.into_analog();
+        //     let adc2_in_p = gpiof.pf14.into_analog();
 
-            Some(
-                pounder::PounderDevices::new(
-                    io_expander,
-                    ad9959,
-                    spi,
-                    adc1,
-                    adc2,
-                    adc1_in_p,
-                    adc2_in_p,
-                )
-                .unwrap(),
-            )
-        } else {
-            None
-        };
+        //     Some(
+        //         pounder::PounderDevices::new(
+        //             io_expander,
+        //             ad9959,
+        //             spi,
+        //             adc1,
+        //             adc2,
+        //             adc1_in_p,
+        //             adc2_in_p,
+        //         )
+        //         .unwrap(),
+        //     )
+        // } else {
+        //     None
+        // };
 
         let mut eeprom_i2c = {
+            // ok: CN9_21
             let sda = gpiof.pf0.into_alternate_af4().set_open_drain();
+            // ok: CN9_19
             let scl = gpiof.pf1.into_alternate_af4().set_open_drain();
             dp.I2C2.i2c(
                 (scl, sda),
@@ -613,16 +684,16 @@ const APP: () = {
                 .pc5
                 .into_alternate_af11()
                 .set_speed(hal::gpio::Speed::VeryHigh);
-            let _rmii_tx_en = gpiob
-                .pb11
+            let _rmii_tx_en = gpiog
+                .pg11
                 .into_alternate_af11()
                 .set_speed(hal::gpio::Speed::VeryHigh);
-            let _rmii_txd0 = gpiob
-                .pb12
+            let _rmii_txd0 = gpiog
+                .pg13
                 .into_alternate_af11()
                 .set_speed(hal::gpio::Speed::VeryHigh);
-            let _rmii_txd1 = gpiog
-                .pg14
+            let _rmii_txd1 = gpiob
+                .pb13
                 .into_alternate_af11()
                 .set_speed(hal::gpio::Speed::VeryHigh);
         }
@@ -700,6 +771,8 @@ const APP: () = {
             afe0: afe0,
             afe1: afe1,
 
+            toggle,
+
             adcs,
             dacs,
 
@@ -718,21 +791,70 @@ const APP: () = {
         c.resources.dacs.update();
     }
 
-    #[task(binds=DMA1_STR3, resources=[adcs, dacs, iir_state, iir_ch], priority=2)]
+    #[task(binds=DMA1_STR3, resources=[adcs, dacs, iir_state, iir_ch, toggle, last_tstamp, lockin_iir, lockin_iir_state, tstamps_mem], priority=2)]
     fn adc_update(mut c: adc_update::Context) {
         let (adc0_samples, adc1_samples) =
             c.resources.adcs.transfer_complete_handler();
 
-        for (adc0, adc1) in adc0_samples.iter().zip(adc1_samples.iter()) {
-            let result_adc0 = c.resources.iir_ch[0]
-                .update_from_adc_sample(*adc0, &mut c.resources.iir_state[0]);
+        // for (adc0, adc1) in adc0_samples.iter().zip(adc1_samples.iter()) {
+        //     c.resources.toggle.set_high();
+        //     let result_adc0 = c.resources.iir_ch[0]
+        //         .update_from_adc_sample(*adc0, &mut c.resources.iir_state[0]);
+        //     c.resources.toggle.set_low();
 
-            let result_adc1 = c.resources.iir_ch[1]
-                .update_from_adc_sample(*adc1, &mut c.resources.iir_state[1]);
+        //     let result_adc1 = c.resources.iir_ch[1]
+        //         .update_from_adc_sample(*adc1, &mut c.resources.iir_state[1]);
 
-            c.resources
-                .dacs
-                .lock(|dacs| dacs.push(result_adc0, result_adc1));
+        //     c.resources
+        //         .dacs
+        //         .lock(|dacs| dacs.push(result_adc0, result_adc1));
+        // }
+
+        // TODO will be replaced by actual timestamps.
+        let mut tstamps: [u16; 8] = [0; 8];
+        tstamps[0] = (*c.resources.last_tstamp + TSTAMP_INC) % TSTAMP_MAX;
+        for i in 1..4 {
+            tstamps[i] = (tstamps[i - 1] + TSTAMP_INC) % TSTAMP_MAX;
+        }
+        *c.resources.last_tstamp = tstamps[3];
+
+        let mut lockin_adc_samples: [i16; 16] = [0; 16];
+        for i in 0..16 {
+            lockin_adc_samples[i] = adc0_samples[i] as i16;
+        }
+
+        c.resources.toggle.set_high();
+        // let before = cortex_m::peripheral::DWT::get_cycle_count();
+        let (i_out, q_out) = postfilt_at(
+            lockin_adc_samples,
+            tstamps,
+            4,
+            0.,
+            FFAST,
+            SAMPLE_FREQUENCY_KHZ * 1_000,
+            FSCALE,
+            *c.resources.lockin_iir,
+            c.resources.lockin_iir_state,
+            c.resources.tstamps_mem,
+            c.resources.toggle,
+        );
+        // let after = cortex_m::peripheral::DWT::get_cycle_count();
+        c.resources.toggle.set_low();
+
+        // let diff =
+        //     if after >= before {
+        //         after - before
+        //     } else {
+        //         after + (U32_MAX - before)
+        //     };
+
+        // TODO semihosting is so slow that it causes ADC overruns
+        // hprintln!("{}", diff);
+
+        for (i, q) in i_out.iter().zip(q_out.iter()) {
+            let i = *i as u16;
+            let q = *q as u16;
+            c.resources.dacs.lock(|dacs| dacs.push(i, q));
         }
     }
 
@@ -928,12 +1050,14 @@ const APP: () = {
 
     #[task(binds = SPI2, priority = 1)]
     fn spi2(_: spi2::Context) {
+        hprintln!("ADC0 input overrun");
         panic!("ADC0 input overrun");
     }
 
     #[task(binds = SPI3, priority = 1)]
     fn spi3(_: spi3::Context) {
-        panic!("ADC0 input overrun");
+        hprintln!("ADC1 input overrun");
+        panic!("ADC1 input overrun");
     }
 
     extern "C" {

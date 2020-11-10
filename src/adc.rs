@@ -3,7 +3,7 @@ use super::{
     Stream, TargetAddress, Transfer,
 };
 
-const INPUT_BUFFER_SIZE: usize = 1;
+const INPUT_BUFFER_SIZE: usize = 16;
 
 #[link_section = ".axisram.buffers"]
 static mut SPI_START: [u16; 1] = [0x00];

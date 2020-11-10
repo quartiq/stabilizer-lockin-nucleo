@@ -1,2 +1,4 @@
 /target
 .gdb_history
+/src/atan_table.txt
+/src/sin_table.txt

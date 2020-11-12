@@ -70,12 +70,6 @@ mod lockin;
 mod pounder;
 mod sampling_timer;
 mod server;
-mod trig;
-mod sinf;
-mod cosf;
-mod rem_pio2f;
-mod k_sinf;
-mod k_cosf;
 
 use adc::{Adc0Input, Adc1Input, AdcInputs};
 use dac::{Dac0Output, Dac1Output, DacOutputs};

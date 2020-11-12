@@ -1,6 +1,11 @@
-use core::f32::consts::PI;
-use super::sinf::sinf;
-use super::cosf::cosf;
+mod sinf;
+mod k_sinf;
+mod cosf;
+mod k_cosf;
+mod rem_pio2f;
+
+use super::trig::sinf::sinf;
+use super::trig::cosf::cosf;
 
 /// Computes the sine of a value `theta` in the range [0, 2*PI).
 ///

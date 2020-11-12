@@ -1,7 +1,10 @@
 use core::f32::consts::PI;
 extern crate libm;
 
-use super::trig::{sin, cos, atan2};
+#[path = "trig/trig.rs"]
+mod trig;
+use trig::{sin, cos, atan2};
+
 use super::iir;
 use stm32h7xx_hal as hal;
 use embedded_hal::digital::v2::{InputPin, OutputPin};

@@ -5,9 +5,8 @@ use super::trig::{sin, cos, atan2};
 use super::iir;
 use stm32h7xx_hal as hal;
 use embedded_hal::digital::v2::{InputPin, OutputPin};
+use super::adc::INPUT_BUFFER_SIZE;
 
-// TODO doesn't make sense to define this here and in adc.rs.
-const INPUT_BUFFER_SIZE: usize = 16;
 const TSTAMP_BUFFER_SIZE: usize = INPUT_BUFFER_SIZE / 2;
 const OUTPUT_BUFFER_SIZE: usize = 1;
 

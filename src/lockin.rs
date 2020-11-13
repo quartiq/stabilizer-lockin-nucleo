@@ -63,16 +63,16 @@ macro_rules! prefilt_no_decimate {
         }
 
         let tadc = tadc($ffast, $fadc);
-        // ~4us
-        // $toggle.set_high();
         let thetas = adc_phases($t[0], $tstamps_mem, $phi, $fscale, tadc, $toggle);
-        // $toggle.set_low();
         let mut sines: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
         let mut cosines: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
+        // 3.1us
+        // $toggle.set_high();
         for i in 0..SAMPLE_BUFFER_SIZE {
             sines[i] = sin(thetas[i]);
             cosines[i] = cos(thetas[i]);
         }
+        // $toggle.set_low();
 
         increment_tstamp_sequence($tstamps_mem);
         demod($x, sines, cosines)
@@ -108,6 +108,11 @@ macro_rules! prefilt_no_decimate {
 /// frequency.
 /// * `tstamps_mem` - Last two external reference timestamps (i.e., recorded
 /// values of `t`.)
+///
+/// # Latency (ADC batch size = 16): 6.9us
+///
+/// * 3.3us to compute ADC phase values
+/// * 3.1us to compute sin and cos
 pub fn prefilt(
     x: [i16; SAMPLE_BUFFER_SIZE],
     t: [u16; TSTAMP_BUFFER_SIZE],
@@ -132,6 +137,11 @@ pub fn prefilt(
 /// * `iir` - IIR biquad for in-phase and quadrature components.
 /// * `iirstate` - IIR biquad state for in-phase and quadrature
 /// components.
+///
+/// # Latency (ADC batch size = 16, DAC size = 1, filter then decimate): 10.6us
+///
+/// * 6.9us from `prefilt`
+/// * 3.5us from `filter`
 pub fn postfilt_iq(
     x: [i16; SAMPLE_BUFFER_SIZE],
     t: [u16; TSTAMP_BUFFER_SIZE],
@@ -204,6 +214,7 @@ pub fn postfilt_at(
         // ([ifilt], [qfilt])
     };
 
+    // 198ns for size of 1.
     iq_to_at_map(i, q)
 }
 
@@ -221,6 +232,10 @@ pub const fn arr(ffast: u32, fadc: u32, n: u16) -> u16 {
 }
 
 /// Simple average.
+///
+/// # Arguments
+///
+/// * `x` - Array of samples to average.
 fn avg(x: [f32; SAMPLE_BUFFER_SIZE]) -> f32 {
     let mut total: f32 = 0.;
     for val in x.iter() {
@@ -322,6 +337,10 @@ fn iq_to_t(i: f32, q: f32) -> f32 {
 /// * `phi` - Reference phase offset.
 /// * `fscale` - Frequency scaling factor for the demodulation signal.
 /// * `tadc` - ADC sampling period.
+///
+/// # Latency (ADC batch size = 16): 3.27us
+///
+/// 2.9us from computing `real_phase`.
 fn adc_phases(
     first_t: u16,
     tstamps: &mut [TimeStamp; 2],
@@ -335,6 +354,7 @@ fn adc_phases(
     let mut thetas: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
     let mut theta_count: u16;
 
+    // 68ns
     if tstamps[0].sequences_old == 0 {
         theta_count = tref_count - first_t;
     } else {
@@ -402,10 +422,9 @@ fn increment_tstamp_sequence(tstamps: &mut [TimeStamp; 2]) {
 /// period in counts.
 /// * `period_count` - Number of counts in 1 period.
 /// * `phase_count` - Phase offset. In the same units as `period_count`.
+///
+/// # Latency (ADC batch size = 16): 138ns
 fn real_phase(theta_count: u16, period_count: f32, phase_count: f32) -> f32 {
-    // let total_angle = (theta_count as f32 + phase_count) % period_count;
-    // ~173ns
-    // let total_angle = libm::fmodf(theta_count as f32 + phase_count, period_count);
     let total_angle = fmodf(theta_count as f32 + phase_count, period_count);
     2. * PI * (total_angle / period_count)
 }
@@ -432,6 +451,8 @@ fn fmodf(dividend: f32, divisor: f32) -> f32 {
 /// `iir` - IIR filters for the in phase (element 0) and quadrature
 /// (element 1) signals.
 /// `iirstate` - State of each IIR filter.
+///
+/// Latency (ADC batch size = 16): 3.5us
 fn filter(
     i: [f32; SAMPLE_BUFFER_SIZE],
     q: [f32; SAMPLE_BUFFER_SIZE],

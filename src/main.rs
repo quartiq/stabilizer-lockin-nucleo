@@ -691,7 +691,7 @@ const APP: () = {
 
         c.resources.toggle.set_high();
         // let before = cortex_m::peripheral::DWT::get_cycle_count();
-        let (i_out, q_out) = prefilt(
+        let (i_out, q_out) = postfilt_at(
             lockin_adc_samples,
             tstamps,
             4,
@@ -699,8 +699,8 @@ const APP: () = {
             FFAST,
             SAMPLE_FREQUENCY_KHZ * 1_000,
             FSCALE,
-            // *c.resources.lockin_iir,
-            // c.resources.lockin_iir_state,
+            *c.resources.lockin_iir,
+            c.resources.lockin_iir_state,
             c.resources.tstamps_mem,
             c.resources.toggle,
         );

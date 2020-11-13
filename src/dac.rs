@@ -5,7 +5,7 @@
 ///! results in DAC update for both channels.
 use super::{
     hal, sampling_timer, DMAReq, DmaConfig, MemoryToPeripheral, TargetAddress,
-    Transfer, SAMPLE_BUFFER_SIZE,
+    Transfer, SAMPLE_BUFFER_SIZE, OUTPUT_BUFFER_SIZE
 };
 
 // The following global buffers are used for the DAC code DMA transfers. Two buffers are used for
@@ -13,16 +13,16 @@ use super::{
 // processed). Note that the contents of AXI SRAM is uninitialized, so the buffer contents on
 // startup are undefined.
 #[link_section = ".axisram.buffers"]
-static mut DAC0_BUF0: [u16; SAMPLE_BUFFER_SIZE] = [0; SAMPLE_BUFFER_SIZE];
+static mut DAC0_BUF0: [u16; OUTPUT_BUFFER_SIZE] = [0; OUTPUT_BUFFER_SIZE];
 
 #[link_section = ".axisram.buffers"]
-static mut DAC0_BUF1: [u16; SAMPLE_BUFFER_SIZE] = [0; SAMPLE_BUFFER_SIZE];
+static mut DAC0_BUF1: [u16; OUTPUT_BUFFER_SIZE] = [0; OUTPUT_BUFFER_SIZE];
 
 #[link_section = ".axisram.buffers"]
-static mut DAC1_BUF0: [u16; SAMPLE_BUFFER_SIZE] = [0; SAMPLE_BUFFER_SIZE];
+static mut DAC1_BUF0: [u16; OUTPUT_BUFFER_SIZE] = [0; OUTPUT_BUFFER_SIZE];
 
 #[link_section = ".axisram.buffers"]
-static mut DAC1_BUF1: [u16; SAMPLE_BUFFER_SIZE] = [0; SAMPLE_BUFFER_SIZE];
+static mut DAC1_BUF1: [u16; OUTPUT_BUFFER_SIZE] = [0; OUTPUT_BUFFER_SIZE];
 
 /// SPI4 is used as a ZST (zero-sized type) for indicating a DMA transfer into the SPI4 TX FIFO
 struct SPI4 {}
@@ -87,8 +87,8 @@ impl DacOutputs {
     /// * `dac1_codes` - The output codes for DAC1 to enqueue.
     pub fn next_data(
         &mut self,
-        dac0_codes: &[u16; SAMPLE_BUFFER_SIZE],
-        dac1_codes: &[u16; SAMPLE_BUFFER_SIZE],
+        dac0_codes: &[u16; OUTPUT_BUFFER_SIZE],
+        dac1_codes: &[u16; OUTPUT_BUFFER_SIZE],
     ) {
         self.dac0.next_data(dac0_codes);
         self.dac1.next_data(dac1_codes);
@@ -97,13 +97,13 @@ impl DacOutputs {
 
 /// Represents data associated with DAC0.
 pub struct Dac0Output {
-    next_buffer: Option<&'static mut [u16; SAMPLE_BUFFER_SIZE]>,
+    next_buffer: Option<&'static mut [u16; OUTPUT_BUFFER_SIZE]>,
     _spi: hal::spi::Spi<hal::stm32::SPI4, hal::spi::Disabled, u16>,
     transfer: Transfer<
         hal::dma::dma::Stream4<hal::stm32::DMA1>,
         SPI4,
         MemoryToPeripheral,
-        &'static mut [u16; SAMPLE_BUFFER_SIZE],
+        &'static mut [u16; OUTPUT_BUFFER_SIZE],
     >,
     first_transfer: bool,
 }
@@ -163,7 +163,7 @@ impl Dac0Output {
     ///
     /// # Args
     /// * `data` - The next samples to enqueue for transmission.
-    pub fn next_data(&mut self, data: &[u16; SAMPLE_BUFFER_SIZE]) {
+    pub fn next_data(&mut self, data: &[u16; OUTPUT_BUFFER_SIZE]) {
         let next_buffer = self.next_buffer.take().unwrap();
 
         // Copy data into the next buffer
@@ -188,13 +188,13 @@ impl Dac0Output {
 
 /// Represents the data output stream from DAC1.
 pub struct Dac1Output {
-    next_buffer: Option<&'static mut [u16; SAMPLE_BUFFER_SIZE]>,
+    next_buffer: Option<&'static mut [u16; OUTPUT_BUFFER_SIZE]>,
     _spi: hal::spi::Spi<hal::stm32::SPI5, hal::spi::Disabled, u16>,
     transfer: Transfer<
         hal::dma::dma::Stream5<hal::stm32::DMA1>,
         SPI5,
         MemoryToPeripheral,
-        &'static mut [u16; SAMPLE_BUFFER_SIZE],
+        &'static mut [u16; OUTPUT_BUFFER_SIZE],
     >,
     first_transfer: bool,
 }
@@ -255,7 +255,7 @@ impl Dac1Output {
     ///
     /// # Args
     /// * `data` - The next data to write to the DAC.
-    pub fn next_data(&mut self, data: &[u16; SAMPLE_BUFFER_SIZE]) {
+    pub fn next_data(&mut self, data: &[u16; OUTPUT_BUFFER_SIZE]) {
         let next_buffer = self.next_buffer.take().unwrap();
 
         // Copy data into the next buffer

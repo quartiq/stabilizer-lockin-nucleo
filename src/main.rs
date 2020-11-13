@@ -1,4 +1,4 @@
-#![deny(warnings)]
+// #![deny(warnings)]
 #![allow(clippy::missing_safety_doc)]
 #![no_std]
 #![no_main]
@@ -56,7 +56,12 @@ use heapless::{consts::*, String};
 const SAMPLE_FREQUENCY_KHZ: u32 = 500;
 
 // The desired ADC sample processing buffer size.
-const SAMPLE_BUFFER_SIZE: usize = 1;
+const SAMPLE_BUFFER_SIZE: usize = 16;
+// Timestamp buffer size. This should never be greater than
+// `SAMPLE_BUFFER_SIZE/2`.
+const TSTAMP_BUFFER_SIZE: usize = SAMPLE_BUFFER_SIZE / 2;
+// DAC buffer size.
+const OUTPUT_BUFFER_SIZE: usize = 1;
 
 #[link_section = ".sram3.eth"]
 static mut DES_RING: ethernet::DesRing = ethernet::DesRing::new();
@@ -650,42 +655,43 @@ const APP: () = {
         let (adc0_samples, adc1_samples) =
             c.resources.adcs.transfer_complete_handler();
 
-        let mut dac0: [u16; SAMPLE_BUFFER_SIZE] = [0; SAMPLE_BUFFER_SIZE];
-        let mut dac1: [u16; SAMPLE_BUFFER_SIZE] = [0; SAMPLE_BUFFER_SIZE];
+        let mut dac0: [u16; OUTPUT_BUFFER_SIZE] = [0; OUTPUT_BUFFER_SIZE];
+        let mut dac1: [u16; OUTPUT_BUFFER_SIZE] = [0; OUTPUT_BUFFER_SIZE];
 
-        for (i, (adc0, adc1)) in
-            adc0_samples.iter().zip(adc1_samples.iter()).enumerate()
-        {
-            dac0[i] = {
-                let x0 = f32::from(*adc0 as i16);
-                let y0 = c.resources.iir_ch[0]
-                    .update(&mut c.resources.iir_state[0], x0);
-                y0 as i16 as u16 ^ 0x8000
-            };
+        // for (i, (adc0, adc1)) in
+        //     adc0_samples.iter().zip(adc1_samples.iter()).enumerate()
+        // {
+        //     dac0[i] = {
+        //         let x0 = f32::from(*adc0 as i16);
+        //         let y0 = c.resources.iir_ch[0]
+        //             .update(&mut c.resources.iir_state[0], x0);
+        //         y0 as i16 as u16 ^ 0x8000
+        //     };
 
-            dac1[i] = {
-                let x1 = f32::from(*adc1 as i16);
-                let y1 = c.resources.iir_ch[1]
-                    .update(&mut c.resources.iir_state[1], x1);
-                y1 as i16 as u16 ^ 0x8000
-            };
+        //     dac1[i] = {
+        //         let x1 = f32::from(*adc1 as i16);
+        //         let y1 = c.resources.iir_ch[1]
+        //             .update(&mut c.resources.iir_state[1], x1);
+        //         y1 as i16 as u16 ^ 0x8000
+        //     };
+        // }
 
         // TODO will be replaced by actual timestamps.
-        let mut tstamps: [u16; 8] = [0; 8];
+        let mut tstamps: [u16; TSTAMP_BUFFER_SIZE] = [0; TSTAMP_BUFFER_SIZE];
         tstamps[0] = (*c.resources.last_tstamp + TSTAMP_INC) % TSTAMP_MAX;
         for i in 1..4 {
             tstamps[i] = (tstamps[i - 1] + TSTAMP_INC) % TSTAMP_MAX;
         }
         *c.resources.last_tstamp = tstamps[3];
 
-        let mut lockin_adc_samples: [i16; 16] = [0; 16];
+        let mut lockin_adc_samples: [i16; INPUT_BUFFER_SIZE] = [0; INPUT_BUFFER_SIZE];
         for i in 0..16 {
             lockin_adc_samples[i] = adc0_samples[i] as i16;
         }
 
         c.resources.toggle.set_high();
         // let before = cortex_m::peripheral::DWT::get_cycle_count();
-        let (i_out, q_out) = postfilt_at(
+        let (i_out, q_out) = prefilt(
             lockin_adc_samples,
             tstamps,
             4,
@@ -693,8 +699,8 @@ const APP: () = {
             FFAST,
             SAMPLE_FREQUENCY_KHZ * 1_000,
             FSCALE,
-            *c.resources.lockin_iir,
-            c.resources.lockin_iir_state,
+            // *c.resources.lockin_iir,
+            // c.resources.lockin_iir_state,
             c.resources.tstamps_mem,
             c.resources.toggle,
         );
@@ -711,10 +717,11 @@ const APP: () = {
         // TODO semihosting is so slow that it causes ADC overruns
         // hprintln!("{}", diff);
 
-        for (i, q) in i_out.iter().zip(q_out.iter()) {
+        for (n, (i, q)) in i_out.iter().zip(q_out.iter()).enumerate() {
             let i = *i as u16;
             let q = *q as u16;
-            c.resources.dacs.lock(|dacs| dacs.push(i, q));
+            dac0[n] = i;
+            dac1[n] = q;
         }
 
         c.resources.dacs.next_data(&dac0, &dac1);
@@ -924,11 +931,13 @@ const APP: () = {
 
     #[task(binds = SPI4, priority = 1)]
     fn spi4(_: spi4::Context) {
+        hprintln!("DAC0 output error");
         panic!("DAC0 output error");
     }
 
     #[task(binds = SPI5, priority = 1)]
     fn spi5(_: spi5::Context) {
+        hprintln!("DAC1 output error");
         panic!("DAC1 output error");
     }
 
@@ -943,10 +952,12 @@ const APP: () = {
 
 #[exception]
 fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
+    hprintln!("HardFault at {:#?}", ef);
     panic!("HardFault at {:#?}", ef);
 }
 
 #[exception]
 fn DefaultHandler(irqn: i16) {
+    hprintln!("Unhandled exception (IRQn = {})", irqn);
     panic!("Unhandled exception (IRQn = {})", irqn);
 }

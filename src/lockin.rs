@@ -8,10 +8,9 @@ use trig::{sin, cos, atan2};
 use super::iir;
 use stm32h7xx_hal as hal;
 use embedded_hal::digital::v2::{InputPin, OutputPin};
-use super::adc::INPUT_BUFFER_SIZE;
-
-const TSTAMP_BUFFER_SIZE: usize = INPUT_BUFFER_SIZE / 2;
-const OUTPUT_BUFFER_SIZE: usize = 1;
+use super::SAMPLE_BUFFER_SIZE;
+use super::TSTAMP_BUFFER_SIZE;
+use super::OUTPUT_BUFFER_SIZE;
 
 /// Slow external reference edge timestamps.
 #[derive(Copy, Clone)]
@@ -19,7 +18,7 @@ pub struct TimeStamp {
     // Timestamp value.
     pub count: u16,
     // Number of sequences before the current one that the timestamp
-    // occurred. A sequence is a set of `INPUT_BUFFER_SIZE` ADC samples. E.g., a
+    // occurred. A sequence is a set of `SAMPLE_BUFFER_SIZE` ADC samples. E.g., a
     // timestamp from the current sequence has this set to 0, a
     // timestamp from the previous sequence has this set to 1, etc. A
     // value of -1 indicates an invalid timestamp (i.e., one that has
@@ -68,9 +67,9 @@ macro_rules! prefilt_no_decimate {
         // $toggle.set_high();
         let thetas = adc_phases($t[0], $tstamps_mem, $phi, $fscale, tadc, $toggle);
         // $toggle.set_low();
-        let mut sines: [f32; INPUT_BUFFER_SIZE] = [0.; INPUT_BUFFER_SIZE];
-        let mut cosines: [f32; INPUT_BUFFER_SIZE] = [0.; INPUT_BUFFER_SIZE];
-        for i in 0..INPUT_BUFFER_SIZE {
+        let mut sines: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
+        let mut cosines: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
+        for i in 0..SAMPLE_BUFFER_SIZE {
             sines[i] = sin(thetas[i]);
             cosines[i] = cos(thetas[i]);
         }
@@ -87,9 +86,9 @@ macro_rules! prefilt_no_decimate {
 /// * `N` - Number of ADC samples in each processing sequence.
 /// This must be a power of 2.
 /// * `M` - Maximum number of external reference edge timestamps.
-/// The highest this should ever be set is INPUT_BUFFER_SIZE>>1.
+/// The highest this should ever be set is SAMPLE_BUFFER_SIZE>>1.
 /// * `K` - Number of output samples. This must be a power of 2 and
-/// between 1 and `INPUT_BUFFER_SIZE` (inclusive).
+/// between 1 and `SAMPLE_BUFFER_SIZE` (inclusive).
 ///
 /// # Arguments
 ///
@@ -110,7 +109,7 @@ macro_rules! prefilt_no_decimate {
 /// * `tstamps_mem` - Last two external reference timestamps (i.e., recorded
 /// values of `t`.)
 pub fn prefilt(
-    x: [i16; INPUT_BUFFER_SIZE],
+    x: [i16; SAMPLE_BUFFER_SIZE],
     t: [u16; TSTAMP_BUFFER_SIZE],
     r: usize,
     phi: f32,
@@ -134,7 +133,7 @@ pub fn prefilt(
 /// * `iirstate` - IIR biquad state for in-phase and quadrature
 /// components.
 pub fn postfilt_iq(
-    x: [i16; INPUT_BUFFER_SIZE],
+    x: [i16; SAMPLE_BUFFER_SIZE],
     t: [u16; TSTAMP_BUFFER_SIZE],
     r: usize,
     phi: f32,
@@ -168,7 +167,7 @@ pub fn postfilt_iq(
 ///
 /// See `postfilt_iq`.
 pub fn postfilt_at(
-    x: [i16; INPUT_BUFFER_SIZE],
+    x: [i16; SAMPLE_BUFFER_SIZE],
     t: [u16; TSTAMP_BUFFER_SIZE],
     r: usize,
     phi: f32,
@@ -222,7 +221,7 @@ pub const fn arr(ffast: u32, fadc: u32, n: u16) -> u16 {
 }
 
 /// Simple average.
-fn avg(x: [f32; INPUT_BUFFER_SIZE]) -> f32 {
+fn avg(x: [f32; SAMPLE_BUFFER_SIZE]) -> f32 {
     let mut total: f32 = 0.;
     for val in x.iter() {
         total += val;
@@ -330,10 +329,10 @@ fn adc_phases(
     fscale: u16,
     tadc: u16,
     toggle: &mut hal::gpio::gpiod::PD0<hal::gpio::Output<hal::gpio::PushPull>>,
-) -> [f32; INPUT_BUFFER_SIZE] {
-    let overflow_count: u16 = tadc * INPUT_BUFFER_SIZE as u16;
+) -> [f32; SAMPLE_BUFFER_SIZE] {
+    let overflow_count: u16 = tadc * SAMPLE_BUFFER_SIZE as u16;
     let tref_count: u16 = tstamps_diff(tstamps, overflow_count);
-    let mut thetas: [f32; INPUT_BUFFER_SIZE] = [0.; INPUT_BUFFER_SIZE];
+    let mut thetas: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
     let mut theta_count: u16;
 
     if tstamps[0].sequences_old == 0 {
@@ -355,7 +354,7 @@ fn adc_phases(
     let phi_count: f32 = phi / (2. * PI) * tdemod_count;
     // toggle.set_high();
     thetas[0] = real_phase(theta_count, tdemod_count, phi);
-    for i in 1..INPUT_BUFFER_SIZE {
+    for i in 1..SAMPLE_BUFFER_SIZE {
         theta_count += tadc;
         thetas[i] = real_phase(theta_count, tdemod_count, phi_count);
     }
@@ -434,15 +433,15 @@ fn fmodf(dividend: f32, divisor: f32) -> f32 {
 /// (element 1) signals.
 /// `iirstate` - State of each IIR filter.
 fn filter(
-    i: [f32; INPUT_BUFFER_SIZE],
-    q: [f32; INPUT_BUFFER_SIZE],
+    i: [f32; SAMPLE_BUFFER_SIZE],
+    q: [f32; SAMPLE_BUFFER_SIZE],
     iir: [iir::IIR; 2],
     iirstate: &mut [iir::IIRState; 2],
-) -> ([f32; INPUT_BUFFER_SIZE], [f32; INPUT_BUFFER_SIZE]) {
-    let mut filt_i: [f32; INPUT_BUFFER_SIZE] = [0.; INPUT_BUFFER_SIZE];
-    let mut filt_q: [f32; INPUT_BUFFER_SIZE] = [0.; INPUT_BUFFER_SIZE];
+) -> ([f32; SAMPLE_BUFFER_SIZE], [f32; SAMPLE_BUFFER_SIZE]) {
+    let mut filt_i: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
+    let mut filt_q: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
 
-    for n in 0..INPUT_BUFFER_SIZE {
+    for n in 0..SAMPLE_BUFFER_SIZE {
         filt_i[n] = iir[0].update(&mut iirstate[0], i[n]);
         filt_q[n] = iir[1].update(&mut iirstate[1], q[n]);
     }
@@ -450,8 +449,8 @@ fn filter(
     (filt_i, filt_q)
 }
 
-/// Decimate (downsample) from `INPUT_BUFFER_SIZE` to
-/// `OUTPUT_BUFFER_SIZE` samples. INPUT_BUFFER_SIZE/OUTPUT_BUFFER_SIZE
+/// Decimate (downsample) from `SAMPLE_BUFFER_SIZE` to
+/// `OUTPUT_BUFFER_SIZE` samples. SAMPLE_BUFFER_SIZE/OUTPUT_BUFFER_SIZE
 /// is assumed to be equal to 2**n, where n is some non-negative
 /// integer. Decimates the in-phase and quadrature signals separately
 /// and returns the result as (i, q).
@@ -461,16 +460,16 @@ fn filter(
 /// `i` - In-phase signal.
 /// `q` - Quadrature signal.
 fn decimate(
-    i: [f32; INPUT_BUFFER_SIZE],
-    q: [f32; INPUT_BUFFER_SIZE],
+    i: [f32; SAMPLE_BUFFER_SIZE],
+    q: [f32; SAMPLE_BUFFER_SIZE],
 ) -> ([f32; OUTPUT_BUFFER_SIZE], [f32; OUTPUT_BUFFER_SIZE]) {
-    let n_sub_k: usize = INPUT_BUFFER_SIZE / OUTPUT_BUFFER_SIZE;
+    let n_sub_k: usize = SAMPLE_BUFFER_SIZE / OUTPUT_BUFFER_SIZE;
     let mut res_i: [f32; OUTPUT_BUFFER_SIZE] = [0.; OUTPUT_BUFFER_SIZE];
     let mut res_q: [f32; OUTPUT_BUFFER_SIZE] = [0.; OUTPUT_BUFFER_SIZE];
 
     let mut n: usize = 0;
     let mut k: usize = 0;
-    while n < INPUT_BUFFER_SIZE {
+    while n < SAMPLE_BUFFER_SIZE {
         res_i[k] = i[n];
         res_q[k] = q[n];
         k += 1;
@@ -489,14 +488,14 @@ fn decimate(
 /// * `sines` - Reference sine signal.
 /// * `cosines` - Reference cosine signal.
 fn demod(
-    x: [i16; INPUT_BUFFER_SIZE],
-    sines: [f32; INPUT_BUFFER_SIZE],
-    cosines: [f32; INPUT_BUFFER_SIZE],
-) -> ([f32; INPUT_BUFFER_SIZE], [f32; INPUT_BUFFER_SIZE]) {
-    let mut i: [f32; INPUT_BUFFER_SIZE] = [0.; INPUT_BUFFER_SIZE];
-    let mut q: [f32; INPUT_BUFFER_SIZE] = [0.; INPUT_BUFFER_SIZE];
+    x: [i16; SAMPLE_BUFFER_SIZE],
+    sines: [f32; SAMPLE_BUFFER_SIZE],
+    cosines: [f32; SAMPLE_BUFFER_SIZE],
+) -> ([f32; SAMPLE_BUFFER_SIZE], [f32; SAMPLE_BUFFER_SIZE]) {
+    let mut i: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
+    let mut q: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
 
-    for n in 0..INPUT_BUFFER_SIZE {
+    for n in 0..SAMPLE_BUFFER_SIZE {
         let xf_n: f32 = x[n] as f32;
         i[n] = xf_n * sines[n];
         q[n] = xf_n * cosines[n];
@@ -815,12 +814,12 @@ mod tests {
 
     // #[test]
     // fn demod_n4() {
-    //     const INPUT_BUFFER_SIZE: usize = 4;
-    //     let x: [i16; INPUT_BUFFER_SIZE] = [-1, 0, 1, -18];
-    //     let sines: [f32; INPUT_BUFFER_SIZE] = [0.1, -0.3, 18.76, -33.1];
-    //     let cosines: [f32; INPUT_BUFFER_SIZE] = [-0.2389, 0.1823, 0.123, -0.5839];
+    //     const SAMPLE_BUFFER_SIZE: usize = 4;
+    //     let x: [i16; SAMPLE_BUFFER_SIZE] = [-1, 0, 1, -18];
+    //     let sines: [f32; SAMPLE_BUFFER_SIZE] = [0.1, -0.3, 18.76, -33.1];
+    //     let cosines: [f32; SAMPLE_BUFFER_SIZE] = [-0.2389, 0.1823, 0.123, -0.5839];
     //     let (i, q) = demod::<N>(x, sines, cosines);
-    //     for n in 0..INPUT_BUFFER_SIZE {
+    //     for n in 0..SAMPLE_BUFFER_SIZE {
     //         assert!(f32_is_close(i[n], x[n] as f32 * sines[n]));
     //         assert!(f32_is_close(q[n], x[n] as f32 * cosines[n]));
     //     }

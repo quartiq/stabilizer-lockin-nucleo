@@ -695,7 +695,7 @@ const APP: () = {
             lockin_adc_samples,
             tstamps,
             4,
-            0.,
+            0,
             FFAST,
             SAMPLE_FREQUENCY_KHZ * 1_000,
             FSCALE,

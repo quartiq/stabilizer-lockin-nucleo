@@ -1,4 +1,6 @@
 use core::f32::consts::PI;
+use core::ops::SubAssign;
+use core::cmp::Ord;
 extern crate libm;
 
 #[path = "trig/trig.rs"]
@@ -64,10 +66,9 @@ macro_rules! prefilt_no_decimate {
 
         let tadc = tadc($ffast, $fadc);
         let thetas = adc_phases($t[0], $tstamps_mem, $phi, $fscale, tadc, $toggle);
+        // $toggle.set_high();
         let mut sines: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
         let mut cosines: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
-        // 3.1us
-        // $toggle.set_high();
         for i in 0..SAMPLE_BUFFER_SIZE {
             sines[i] = sin(thetas[i]);
             cosines[i] = cos(thetas[i]);
@@ -96,9 +97,8 @@ macro_rules! prefilt_no_decimate {
 /// * `t` - Counter values indicate the timestamps of the slow external
 /// reference clock edges.
 /// * `r` - Number of valid timestamps in `t`.
-/// * `phi` - Demodulation phase offset. This phase shifts the
-/// demodulation signal. This is applied after the frequency scaling
-/// factor multiplies the reference frequency.
+/// * `phi` - Demodulation phase offset specified as a number of counts
+/// relative the fast clock period.
 /// * `ffast` - Fast clock frequency (Hz). The fast clock increments
 /// timestamp counter values used to record the edges of the external
 /// reference.
@@ -109,15 +109,15 @@ macro_rules! prefilt_no_decimate {
 /// * `tstamps_mem` - Last two external reference timestamps (i.e., recorded
 /// values of `t`.)
 ///
-/// # Latency (ADC batch size = 16): 6.9us
+/// # Latency (ADC batch size = 16): 5.6us
 ///
-/// * 3.3us to compute ADC phase values
-/// * 3.1us to compute sin and cos
+/// * 2.0us to compute ADC phase values
+/// * 3.4us to compute sin and cos
 pub fn prefilt(
     x: [i16; SAMPLE_BUFFER_SIZE],
     t: [u16; TSTAMP_BUFFER_SIZE],
     r: usize,
-    phi: f32,
+    phi: u16,
     ffast: u32,
     fadc: u32,
     fscale: u16,
@@ -138,15 +138,16 @@ pub fn prefilt(
 /// * `iirstate` - IIR biquad state for in-phase and quadrature
 /// components.
 ///
-/// # Latency (ADC batch size = 16, DAC size = 1, filter then decimate): 10.6us
+/// # Latency (ADC batch size = 16, DAC size = 1, filter then decimate): 9.4us
+/// # Latency (ADC batch size = 16, DAC size = 1, boxcar then filter): 6.2us
 ///
-/// * 6.9us from `prefilt`
+/// * 5.6us from `prefilt`
 /// * 3.5us from `filter`
 pub fn postfilt_iq(
     x: [i16; SAMPLE_BUFFER_SIZE],
     t: [u16; TSTAMP_BUFFER_SIZE],
     r: usize,
-    phi: f32,
+    phi: u16,
     ffast: u32,
     fadc: u32,
     fscale: u16,
@@ -176,11 +177,14 @@ pub fn postfilt_iq(
 /// # Arguments
 ///
 /// See `postfilt_iq`.
+///
+/// # Latency (ADC batch size = 16, DAC size = 1, filter then decimate): 9.6us
+/// # Latency (ADC batch size = 16, DAC size = 1, boxcar then filter): 6.4us
 pub fn postfilt_at(
     x: [i16; SAMPLE_BUFFER_SIZE],
     t: [u16; TSTAMP_BUFFER_SIZE],
     r: usize,
-    phi: f32,
+    phi: u16,
     ffast: u32,
     fadc: u32,
     fscale: u16,
@@ -344,7 +348,7 @@ fn iq_to_t(i: f32, q: f32) -> f32 {
 fn adc_phases(
     first_t: u16,
     tstamps: &mut [TimeStamp; 2],
-    phi: f32,
+    phi: u16,
     fscale: u16,
     tadc: u16,
     toggle: &mut hal::gpio::gpiod::PD0<hal::gpio::Output<hal::gpio::PushPull>>,
@@ -370,13 +374,11 @@ fn adc_phases(
         );
     }
 
-    let tdemod_count: f32 = tref_count as f32 / fscale as f32;
-    let phi_count: f32 = phi / (2. * PI) * tdemod_count;
     // toggle.set_high();
-    thetas[0] = real_phase(theta_count, tdemod_count, phi);
+    thetas[0] = real_phase(theta_count, fscale, tref_count, phi);
     for i in 1..SAMPLE_BUFFER_SIZE {
         theta_count += tadc;
-        thetas[i] = real_phase(theta_count, tdemod_count, phi_count);
+        thetas[i] = real_phase(theta_count, fscale, tref_count, phi);
     }
     // toggle.set_low();
 
@@ -420,19 +422,20 @@ fn increment_tstamp_sequence(tstamps: &mut [TimeStamp; 2]) {
 ///
 /// * `theta_count` - Phase in counts. This can be greater than the
 /// period in counts.
+/// * `fscale` - Frequency scaling factor for harmonic demodulation.
 /// * `period_count` - Number of counts in 1 period.
 /// * `phase_count` - Phase offset. In the same units as `period_count`.
 ///
 /// # Latency (ADC batch size = 16): 138ns
-fn real_phase(theta_count: u16, period_count: f32, phase_count: f32) -> f32 {
-    let total_angle = fmodf(theta_count as f32 + phase_count, period_count);
-    2. * PI * (total_angle / period_count)
+fn real_phase(theta_count: u16, fscale: u16, period_count: u16, phase_count: u16) -> f32 {
+    let total_angle = modulo::<u16>(theta_count * fscale + phase_count, period_count);
+    2. * PI * (total_angle as f32 / period_count as f32)
 }
 
-/// f32 modulo operation. This assumes the dividend and divisor are
+// Arithmetic modulo operation. This assumes the dividend and divisor are
 /// positive, although it also works in some other cases.
-fn fmodf(dividend: f32, divisor: f32) -> f32 {
-    let mut rem: f32 = dividend;
+fn modulo<T: SubAssign + Ord + Copy>(dividend: T, divisor: T) -> T {
+    let mut rem: T = dividend;
     while rem > divisor {
         rem -= divisor;
     }

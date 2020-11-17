@@ -83,7 +83,7 @@ use lockin::{postfilt_at, postfilt_iq, prefilt, TimeStamp, arr};
 // Gives exactly 4 timestamps.
 const FFAST: u32 = 125_000_000;
 const INPUT_BUFFER_SIZE: usize = 16;
-const FSCALE: u16 = 1;
+const FSCALE: u32 = 1;
 const FREF: u32 = 125_000;
 const TSTAMP_INC: u16 = (FFAST / FREF) as u16;
 const TSTAMP_MAX: u16 = arr(FFAST, SAMPLE_FREQUENCY_KHZ * 1_000, INPUT_BUFFER_SIZE as u16);

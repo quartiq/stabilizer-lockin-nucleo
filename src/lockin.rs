@@ -18,14 +18,14 @@ use super::OUTPUT_BUFFER_SIZE;
 #[derive(Copy, Clone)]
 pub struct TimeStamp {
     // Timestamp value.
-    pub count: u16,
+    pub count: u32,
     // Number of sequences before the current one that the timestamp
     // occurred. A sequence is a set of `SAMPLE_BUFFER_SIZE` ADC samples. E.g., a
     // timestamp from the current sequence has this set to 0, a
     // timestamp from the previous sequence has this set to 1, etc. A
     // value of -1 indicates an invalid timestamp (i.e., one that has
     // not yet been set).
-    pub sequences_old: i16,
+    pub sequences_old: i32,
 }
 
 impl TimeStamp {
@@ -50,7 +50,7 @@ impl TimeStamp {
     ///
     /// * `newval` - New count value.
     pub fn new_count(&mut self, newval: u16) {
-        self.count = newval;
+        self.count = newval as u32;
         self.sequences_old = 0;
     }
 }
@@ -64,8 +64,8 @@ macro_rules! prefilt_no_decimate {
             return ([0.; OUTPUT_BUFFER_SIZE], [0.; OUTPUT_BUFFER_SIZE]);
         }
 
-        let tadc = tadc($ffast, $fadc);
-        let thetas = adc_phases($t[0], $tstamps_mem, $phi, $fscale, tadc, $toggle);
+        let tadc = tadc($ffast, $fadc) as u32;
+        let thetas = adc_phases($t[0] as u32, $tstamps_mem, $phi, $fscale, tadc, $toggle);
         // $toggle.set_high();
         let mut sines: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
         let mut cosines: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
@@ -117,10 +117,10 @@ pub fn prefilt(
     x: [i16; SAMPLE_BUFFER_SIZE],
     t: [u16; TSTAMP_BUFFER_SIZE],
     r: usize,
-    phi: u16,
+    phi: u32,
     ffast: u32,
     fadc: u32,
-    fscale: u16,
+    fscale: u32,
     tstamps_mem: &mut [TimeStamp; 2],
     toggle: &mut hal::gpio::gpiod::PD0<hal::gpio::Output<hal::gpio::PushPull>>,
 ) -> ([f32; OUTPUT_BUFFER_SIZE], [f32; OUTPUT_BUFFER_SIZE]) {
@@ -147,10 +147,10 @@ pub fn postfilt_iq(
     x: [i16; SAMPLE_BUFFER_SIZE],
     t: [u16; TSTAMP_BUFFER_SIZE],
     r: usize,
-    phi: u16,
+    phi: u32,
     ffast: u32,
     fadc: u32,
-    fscale: u16,
+    fscale: u32,
     iir: [iir::IIR; 2],
     iirstate: &mut [iir::IIRState; 2],
     tstamps_mem: &mut [TimeStamp; 2],
@@ -184,10 +184,10 @@ pub fn postfilt_at(
     x: [i16; SAMPLE_BUFFER_SIZE],
     t: [u16; TSTAMP_BUFFER_SIZE],
     r: usize,
-    phi: u16,
+    phi: u32,
     ffast: u32,
     fadc: u32,
-    fscale: u16,
+    fscale: u32,
     iir: [iir::IIR; 2],
     iirstate: &mut [iir::IIRState; 2],
     tstamps_mem: &mut [TimeStamp; 2],
@@ -342,21 +342,21 @@ fn iq_to_t(i: f32, q: f32) -> f32 {
 /// * `fscale` - Frequency scaling factor for the demodulation signal.
 /// * `tadc` - ADC sampling period.
 ///
-/// # Latency (ADC batch size = 16): 3.27us
+/// # Latency (ADC batch size = 16): 3.3us
 ///
 /// 2.9us from computing `real_phase`.
 fn adc_phases(
-    first_t: u16,
+    first_t: u32,
     tstamps: &mut [TimeStamp; 2],
-    phi: u16,
-    fscale: u16,
-    tadc: u16,
+    phi: u32,
+    fscale: u32,
+    tadc: u32,
     toggle: &mut hal::gpio::gpiod::PD0<hal::gpio::Output<hal::gpio::PushPull>>,
 ) -> [f32; SAMPLE_BUFFER_SIZE] {
-    let overflow_count: u16 = tadc * SAMPLE_BUFFER_SIZE as u16;
-    let tref_count: u16 = tstamps_diff(tstamps, overflow_count);
+    let overflow_count: u32 = tadc * SAMPLE_BUFFER_SIZE as u32;
+    let tref_count: u32 = tstamps_diff(tstamps, overflow_count);
     let mut thetas: [f32; SAMPLE_BUFFER_SIZE] = [0.; SAMPLE_BUFFER_SIZE];
-    let mut theta_count: u16;
+    let mut theta_count: u32;
 
     // 68ns
     if tstamps[0].sequences_old == 0 {
@@ -396,17 +396,17 @@ fn adc_phases(
 ///
 /// * `tstamps` - TimeStamp values.
 /// * `overflow_count` - Max timestamp value.
-fn tstamps_diff(tstamps: &[TimeStamp; 2], overflow_count: u16) -> u16 {
+fn tstamps_diff(tstamps: &[TimeStamp; 2], overflow_count: u32) -> u32 {
     if tstamps[0].sequences_old == tstamps[1].sequences_old {
         return tstamps[0].count - tstamps[1].count;
     }
 
-    let rem0: u16 = tstamps[0].count;
-    let rem1: u16 = overflow_count - tstamps[1].count;
+    let rem0: u32 = tstamps[0].count;
+    let rem1: u32 = overflow_count - tstamps[1].count;
     let empty_sequences =
         tstamps[1].sequences_old - tstamps[0].sequences_old - 1;
 
-    rem0 + rem1 + overflow_count * empty_sequences as u16
+    rem0 + rem1 + overflow_count * empty_sequences as u32
 }
 
 /// Increment `sequences_old` in each TimeStamp of `tstamps`.
@@ -427,8 +427,8 @@ fn increment_tstamp_sequence(tstamps: &mut [TimeStamp; 2]) {
 /// * `phase_count` - Phase offset. In the same units as `period_count`.
 ///
 /// # Latency (ADC batch size = 16): 138ns
-fn real_phase(theta_count: u16, fscale: u16, period_count: u16, phase_count: u16) -> f32 {
-    let total_angle = modulo::<u16>(theta_count * fscale + phase_count, period_count);
+fn real_phase(theta_count: u32, fscale: u32, period_count: u32, phase_count: u32) -> f32 {
+    let total_angle = modulo::<u32>(theta_count * fscale + phase_count, period_count);
     2. * PI * (total_angle as f32 / period_count as f32)
 }
 

@@ -178,9 +178,9 @@ dependencies = [
 
 [[package]]
 name = "cortex-m-semihosting"
-version = "0.3.5"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "113ef0ecffee2b62b58f9380f4469099b30e9f9cbee2804771b4203ba1762cfa"
+checksum = "4a45edad3d06333f85f91796a05e82d92758158219cf6423cb9e40a6ad825826"
 dependencies = [
  "cortex-m",
 ]
